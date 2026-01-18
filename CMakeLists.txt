@@ -22,7 +22,7 @@ project(RayTracingDemo
     LANGUAGES CXX C
 )
 
-# --- 4. Standart claryfication C++ ---
+# --- 4. Standard clarification C++ ---
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -41,24 +41,42 @@ endif()
 # Dependencies
 include(cmake/Dependencies.cmake)
 
-# --- 5. Target ---
-add_executable(${PROJECT_NAME}
-    src/main.cpp
-)
+# ==========================================
+# LIBRARY: RayTracingCore (Logic & Math)
+# ==========================================
+add_library(RayTracingCore STATIC)
 
-# Setting up Modules 
-target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
+target_compile_features(RayTracingCore PUBLIC cxx_std_20)
 
-target_sources(${PROJECT_NAME} PUBLIC
+# C++ Sources
+target_sources(RayTracingCore PUBLIC
     src/LoadModel.cpp
     src/SurfaceAreaHeuristic.cpp
 )
 
-
-target_sources(${PROJECT_NAME} PUBLIC
+# C++ Modules (Core Logic)
+target_sources(RayTracingCore PUBLIC
     FILE_SET CXX_MODULES FILES 
     src/Engine.cppm
     src/Types.cppm
+)
+
+target_link_libraries(RayTracingCore PUBLIC
+    tinygltf_lib
+)
+
+# ==========================================
+# EXECUTABLE: RayTracingDemo (App & UI)
+# ==========================================
+add_executable(${PROJECT_NAME}
+    src/main.cpp
+)
+
+target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
+
+# C++ Modules (App Logic)
+target_sources(${PROJECT_NAME} PUBLIC
+    FILE_SET CXX_MODULES FILES 
     src/ShaderController.cppm
     src/Window.cppm
     src/UI.cppm
@@ -66,11 +84,12 @@ target_sources(${PROJECT_NAME} PUBLIC
 
 set_target_properties(${PROJECT_NAME} PROPERTIES CXX_SCAN_FOR_MODULES ON)
 
+# Link against our Core library + Graphics libs
 target_link_libraries(${PROJECT_NAME} PRIVATE
+    RayTracingCore
     Vulkan::Vulkan
     glfw
     imgui_lib
-    tinygltf_lib
 )
 
 # Create dir for shaders
@@ -86,5 +105,6 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMENT "Copying shaders to build directory"
 )
 
+# --- Testing ---
 enable_testing()
 add_subdirectory(tests)

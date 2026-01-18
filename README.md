@@ -73,6 +73,10 @@ ninja -C build/debug && ./build/debug/RayTracingDemo
 ```
 ./build/debug/RayTracingDemo
 ```
+6. **Tests**
+```
+./build/debug/ctest
+```
 
 
 ## 🎮 Controls
