@@ -1,0 +1,217 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// --- Constants ---
+const float FLT_MAX = 3.402823466e+38;
+const float EPSILON = 0.001;
+const int MAX_STACK_SIZE = 16; 
+
+// --- Structures ---
+struct Triangle { vec3 v1, v2, v3, normal; };
+
+struct BVHNode {
+    uint minPacked[2]; 
+    uint maxPacked[2]; 
+    uint leftFirst;
+    uint triCount;
+};
+
+// --- Bindings ---
+layout(std430, binding = 0) readonly buffer TriangleBuffer { uint data[]; } triangles;
+layout(std430, binding = 1) readonly buffer BVHBuffer { BVHNode nodes[]; } bvh;
+
+layout(binding = 2, rgba8) uniform image2D resultImage;
+
+layout(std140, binding = 3) uniform SceneSettings {
+    vec4 light1Color;
+    vec4 light2Color;
+    vec4 light1Pos;   
+    vec4 light2Pos;   
+    int maxBounces;
+} settings;
+
+// Must match C++ PushConstants EXACTLY
+layout(push_constant) uniform Constants {
+    vec4 minBounds;  // 16
+    vec4 extent;     // 32
+    vec4 camPos;     // 48
+    vec4 camDir;     // 64
+    vec4 camUp;      // 80
+    int frameCount;  // 84 (Used for RNG Seed only)
+    // implicit padding to 96
+} push;
+
+// --- Helpers ---
+vec3 unpackPos(uint u1, uint u2, uint u3) {
+    vec3 n = vec3(float(u1), float(u2), float(u3)) / 65535.0;
+    return n * push.extent.xyz + push.minBounds.xyz;
+}
+
+vec3 unpackNormal(uint u1, uint u2, uint u3) {
+    vec3 n = vec3(float(u1), float(u2), float(u3)) / 65535.0;
+    return normalize(n * 2.0 - 1.0);
+}
+
+Triangle getTriangle(uint index) {
+    uint base = index * 6;
+    uint r0 = triangles.data[base+0];
+    uint r1 = triangles.data[base+1];
+    uint r2 = triangles.data[base+2];
+    uint r3 = triangles.data[base+3];
+    uint r4 = triangles.data[base+4];
+    uint r5 = triangles.data[base+5];
+    
+    Triangle t;
+    t.v1 = unpackPos(r0 & 0xFFFF, r0 >> 16, r1 & 0xFFFF);
+    t.v2 = unpackPos(r1 >> 16, r2 & 0xFFFF, r2 >> 16);
+    t.v3 = unpackPos(r3 & 0xFFFF, r3 >> 16, r4 & 0xFFFF);
+    t.normal = unpackNormal(r4 >> 16, r5 & 0xFFFF, r5 >> 16);
+    return t;
+}
+
+float hitAABB(vec3 minB, vec3 maxB, vec3 origin, vec3 invDir) {
+    vec3 t0 = (minB - origin) * invDir;
+    vec3 t1 = (maxB - origin) * invDir;
+    vec3 tmin = min(t0, t1);
+    vec3 tmax = max(t0, t1);
+    float tNear = max(max(tmin.x, tmin.y), tmin.z);
+    float tFar = min(min(tmax.x, tmax.y), tmax.z);
+    return (tNear > tFar || tFar < 0.0) ? FLT_MAX : tNear;
+}
+
+float hitTriangle(vec3 v0, vec3 v1, vec3 v2, vec3 origin, vec3 dir) {
+    vec3 v0v1 = v1 - v0;
+    vec3 v0v2 = v2 - v0;
+    vec3 pvec = cross(dir, v0v2);
+    float det = dot(v0v1, pvec);
+    
+    if (abs(det) < EPSILON) return FLT_MAX;
+    
+    float invDet = 1.0 / det;
+    vec3 tvec = origin - v0;
+    float u = dot(tvec, pvec) * invDet;
+    
+    if (u < 0.0 || u > 1.0) return FLT_MAX;
+    
+    vec3 qvec = cross(tvec, v0v1);
+    float v = dot(dir, qvec) * invDet;
+    
+    if (v < 0.0 || u + v > 1.0) return FLT_MAX;
+    
+    float t = dot(v0v2, qvec) * invDet;
+    return (t < EPSILON) ? FLT_MAX : t;
+}
+
+// --- Random Number Generator (PCG Hash) ---
+uint rngState;
+uint pcg_hash() {
+    uint state = rngState;
+    rngState = rngState * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+float rand() { return float(pcg_hash()) / 4294967295.0; }
+
+// --- Main ---
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(resultImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    // Use frameCount just for seed variation to avoid static noise pattern
+    rngState = uint(pixel.x * 1973 + pixel.y * 9277 + push.frameCount * 26699) | 1u;
+
+    // --- Camera Setup ---
+    // Always jitter for anti-aliasing look
+    vec2 jitter = vec2(rand() - 0.5, rand() - 0.5);
+    vec2 uv = (vec2(pixel) + 0.5 + jitter) / vec2(size);
+    vec2 d = uv * 2.0 - 1.0;
+    d.x *= float(size.x) / float(size.y);
+
+    vec3 rayOrigin = push.camPos.xyz;
+    vec3 target = push.camDir.xyz; 
+    vec3 forward = normalize(target - rayOrigin);
+    
+    vec3 worldUp = push.camUp.xyz;
+    if (length(worldUp) < 0.1) worldUp = vec3(0,0,1);
+
+    vec3 right = normalize(cross(forward, worldUp));
+    vec3 up = cross(right, forward);
+    
+    vec3 rayDir = normalize(forward + right * d.x + up * d.y);
+
+    vec3 accumulatedColor = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+
+    for (int bounce = 0; bounce < settings.maxBounces; bounce++) {
+        vec3 invDir = 1.0 / rayDir;
+        float closestT = FLT_MAX;
+        vec3 hitNormal = vec3(0.0);
+        bool hit = false;
+        
+        // --- BVH Traversal ---
+        uint stack[MAX_STACK_SIZE]; 
+        int stackPtr = 0;
+        stack[stackPtr++] = 0;
+
+        int iterations = 0;
+        const int MAX_ITERATIONS = 256; 
+
+        while (stackPtr > 0 && iterations < MAX_ITERATIONS) {
+            iterations++;
+            uint nodeIdx = stack[--stackPtr];
+            BVHNode node = bvh.nodes[nodeIdx];
+
+            vec3 boxMin = unpackPos(node.minPacked[0] & 0xFFFF, node.minPacked[0] >> 16, node.minPacked[1] & 0xFFFF);
+            vec3 boxMax = unpackPos(node.maxPacked[0] & 0xFFFF, node.maxPacked[0] >> 16, node.maxPacked[1] & 0xFFFF);
+
+            if (hitAABB(boxMin, boxMax, rayOrigin, invDir) < closestT) {
+                if (node.triCount > 0) {
+                    for (uint i = 0; i < node.triCount; i++) {
+                        Triangle tri = getTriangle(node.leftFirst + i);
+                        float t = hitTriangle(tri.v1, tri.v2, tri.v3, rayOrigin, rayDir);
+                        if (t < closestT) { closestT = t; hitNormal = tri.normal; hit = true; }
+                    }
+                } else {
+                    if (stackPtr < MAX_STACK_SIZE) {
+                        stack[stackPtr++] = node.leftFirst + 1; 
+                        stack[stackPtr++] = node.leftFirst;     
+                    }
+                }
+            }
+        }
+
+        if (hit) {
+            vec3 hitPos = rayOrigin + rayDir * closestT;
+            
+            vec3 light1Pos = push.minBounds.xyz + (push.extent.xyz * settings.light1Pos.xyz);
+            vec3 light2Pos = push.minBounds.xyz + (push.extent.xyz * settings.light2Pos.xyz);
+            vec3 L1 = normalize(light1Pos - hitPos);
+            vec3 L2 = normalize(light2Pos - hitPos);
+
+            if (dot(rayDir, hitNormal) > 0.0) hitNormal = -hitNormal;
+
+            float diff1 = max(dot(hitNormal, L1), 0.0);
+            float diff2 = max(dot(hitNormal, L2), 0.0);
+
+            vec3 directLight = (settings.light1Color.rgb * diff1 + settings.light2Color.rgb * diff2) * 0.8;
+            accumulatedColor += throughput * directLight;
+            throughput *= 0.3; 
+            
+            rayOrigin = hitPos + hitNormal * 0.001;
+            rayDir = reflect(rayDir, hitNormal);
+            if (length(throughput) < 0.01) break;
+
+        } else {
+            float t = 0.5 * (rayDir.z + 1.0);
+            vec3 skyColor = mix(vec3(0.05, 0.05, 0.1), vec3(0.1, 0.1, 0.2), t);
+            accumulatedColor += throughput * skyColor;
+            break; 
+        }
+    }
+
+    // REMOVED: Temporal Accumulation Mix logic.
+    // This stops the "ghosting" or "convulsions" caused by swapchain history.
+    
+    imageStore(resultImage, pixel, vec4(accumulatedColor, 1.0));
+}

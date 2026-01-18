@@ -1,0 +1,49 @@
+# --- Build Directories ---
+build/
+cmake-build-*/
+out/
+bin/
+
+_deps/
+CMakeFiles/
+
+# --- C++ / Compilation Artifacts ---
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.exe
+
+# --- Tooling & IDE ---
+compile_commands.json
+.cache/
+build.ninja
+cmake_install.cmake
+CMakeDoxyfile.in
+CMakeDoxygenDefaults.cmake
+CTestTestfile.cmake
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# CLion / IntelliJ
+.idea/
+
+# Vim / Nano / Emacs
+*~
+*.swp
+*.swo
+
+# --- Vulkan & Graphics Assets ---
+*.spv
+
+# --- Dear ImGui ---
+imgui.ini
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
