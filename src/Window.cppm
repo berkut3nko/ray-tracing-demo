@@ -47,7 +47,6 @@ export namespace Render
         WindowManager() = default;
         ~WindowManager() { cleanup(); }
 
-        // Prevent copying to maintain unique ownership of Vulkan handles
         WindowManager(const WindowManager&) = delete;
         WindowManager& operator=(const WindowManager&) = delete;
 
