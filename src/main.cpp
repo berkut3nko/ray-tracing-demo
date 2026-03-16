@@ -7,6 +7,8 @@
 #include <cstring>
 #include <algorithm>
 #include <functional>
+#include <thread>
+#include <chrono>
 
 import Engine;
 import Types;
@@ -14,85 +16,119 @@ import Window;
 import ShaderController;
 import UI;
 
-bool frameAccumulationReset = true;
+/**
+ * @brief Abstracts the background loading of meshes and BVH building.
+ * Ensures the main loop does not tightly couple with Core structures.
+ */
+class AsyncModelLoader {
+public:
+    struct Result {
+        MeshBounds bounds;
+        std::vector<RaytraceTriangle> gpu_triangles;
+        std::vector<BVHNode> nodes;
+        bool success = false;
+    };
+
+    void start_loading(const std::string& path) {
+        if (isLoading) return;
+        isLoading = true;
+        loadingFuture = std::async(std::launch::async, [path]() {
+            return load_internal(path);
+        });
+    }
+
+    bool check_finished(Result& out_result) {
+        if (isLoading && loadingFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            out_result = loadingFuture.get();
+            isLoading = false;
+            return true;
+        }
+        return false;
+    }
+
+    bool is_loading() const { return isLoading; }
+
+private:
+    std::atomic<bool> isLoading{false};
+    std::future<Result> loadingFuture;
+
+    static Result load_internal(const std::string& path) {
+        Result res;
+        Object obj;
+        std::vector<Triangle> triangles;
+        std::vector<uint> indices;
+
+        std::cout << "[Loader] Thread started for: " << path << std::endl;
+        if (!Core::load_mesh(path, triangles, obj.bounds)) {
+            std::cerr << "[Loader] Failed to load mesh.\n";
+            return res;
+        }
+
+        if(obj.bounds == MeshBounds({0,0,0},{0,0,0}))
+            Core::load_bounds(triangles, obj.bounds);
+
+        Core::load_cache(triangles, obj);
+        Core::build_bvh(obj, indices, res.nodes);
+        res.gpu_triangles = Render::write_in_order(obj.mesh, indices);
+        res.bounds = obj.bounds;
+        res.success = true;
+        
+        return res;
+    }
+};
+
 bool lastSpaceState = false;
 
 int main() {
-    // RAII managed Core components
     Render::WindowManager windowMgr;
     windowMgr.init_vulkan();
 
     UI::UIManager uiMgr;
-    uiMgr.init(&windowMgr.ctx);
+    uiMgr.init(windowMgr.get_context());
 
     Render::ShaderController shaderCtrl;
-    shaderCtrl.init(&windowMgr.ctx);
+    shaderCtrl.init(windowMgr.get_context());
 
     MeshBounds meshBounds;
+    AsyncModelLoader modelLoader;
 
-    std::future<bool> loadingFuture;
-    struct PendingModelData {
-        Object obj;
-        std::vector<Triangle> triangles;
-        std::vector<RaytraceTriangle> gpu_triangles;
-        std::vector<BVHNode> nodes;
-        std::vector<uint> indices;
-    } pendingData;
+    // Initial sync-like loading screen abstraction
+    modelLoader.start_loading(uiMgr.settings.modelPath);
+    AsyncModelLoader::Result loadedData;
     
-    std::atomic<bool> isLoading{false};
+    while (!modelLoader.check_finished(loadedData)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 
-    auto load_model_task = [&](std::string path) -> bool {
-        std::cout << "[Loader] Thread started for: " << path << std::endl;
-        if (!Core::load_mesh(path, pendingData.triangles, pendingData.obj.bounds)) {
-            std::cerr << "[Loader] Failed to load mesh.\n";
-            return false;
-        }
+    if (loadedData.success) {
+        meshBounds = loadedData.bounds;
+        shaderCtrl.reload_buffers(loadedData.gpu_triangles, loadedData.nodes);
+        std::cout << "[Loader] Initial load complete.\n";
 
-        if(pendingData.obj.bounds == MeshBounds({0,0,0},{0,0,0}))
-            Core::load_bounds(pendingData.triangles, pendingData.obj.bounds);
-
-        Core::load_cache(pendingData.triangles, pendingData.obj);
-        Core::build_bvh(pendingData.obj, pendingData.indices, pendingData.nodes);
-        pendingData.gpu_triangles = Render::write_in_order(pendingData.obj.mesh, pendingData.indices);
-        
-        return true;
-    };
-
-    if (load_model_task(uiMgr.settings.modelPath)) {
-         meshBounds = pendingData.obj.bounds;
-         shaderCtrl.reload_buffers(pendingData.gpu_triangles, pendingData.nodes);
-         std::cout << "[Loader] Initial load complete.\n";
-
-         vec3 ext = sub(meshBounds.maxPos, meshBounds.minPos);
-         float maxDim = std::max({ext.x, ext.y, ext.z});
-         if (maxDim < 0.1f) maxDim = 5.0f;
-         uiMgr.settings.camDistance = maxDim;
-         
-         pendingData.triangles.clear();
-         pendingData.gpu_triangles.clear();
-         pendingData.nodes.clear();
-         pendingData.indices.clear();
-         pendingData.obj.mesh.clear();
+        vec3 ext = sub(meshBounds.maxPos, meshBounds.minPos);
+        float maxDim = std::max({ext.x, ext.y, ext.z});
+        if (maxDim < 0.1f) maxDim = 5.0f;
+        uiMgr.settings.camDistance = maxDim;
     }
 
     std::cout << "Starting Main Loop...\n";
     
-    while (!glfwWindowShouldClose(windowMgr.ctx.window)) {
+    while (!glfwWindowShouldClose(windowMgr.get_context()->window)) {
         glfwPollEvents();
         
-        if (windowMgr.ctx.framebufferResized) {
-            windowMgr.ctx.framebufferResized = false;
+        if (windowMgr.get_context()->framebufferResized) {
+            windowMgr.get_context()->framebufferResized = false;
             windowMgr.recreate_swapchain();
             uiMgr.on_resize();
             shaderCtrl.on_resize();
             
             std::cout << "[Window] Resized to " 
-                      << windowMgr.ctx.swapChainExtent.width << "x" 
-                      << windowMgr.ctx.swapChainExtent.height << "\n";
+                      << windowMgr.get_context()->swapChainExtent.width << "x" 
+                      << windowMgr.get_context()->swapChainExtent.height << "\n";
             continue; 
         }
 
-        bool currentSpaceState = glfwGetKey(windowMgr.ctx.window, GLFW_KEY_SPACE) == GLFW_PRESS;
+        bool currentSpaceState = glfwGetKey(windowMgr.get_context()->window, GLFW_KEY_SPACE) == GLFW_PRESS;
         if (currentSpaceState && !lastSpaceState) {
             uiMgr.settings.manualCamera = !uiMgr.settings.manualCamera;
             uiMgr.settings.mouseCaptured = false;
@@ -101,12 +137,12 @@ int main() {
         lastSpaceState = currentSpaceState;
 
         if (uiMgr.settings.manualCamera) {
-            if (glfwGetMouseButton(windowMgr.ctx.window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+            if (glfwGetMouseButton(windowMgr.get_context()->window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
                 if (!uiMgr.settings.mouseCaptured && uiMgr.wants_capture_mouse()) {
-                    // Do nothing - ImGui captured
+                    // Do nothing - ImGui captured the mouse
                 } else {
                     double xpos, ypos;
-                    glfwGetCursorPos(windowMgr.ctx.window, &xpos, &ypos);
+                    glfwGetCursorPos(windowMgr.get_context()->window, &xpos, &ypos);
 
                     if (!uiMgr.settings.mouseCaptured) {
                         uiMgr.settings.lastMouseX = (float)xpos;
@@ -134,21 +170,17 @@ int main() {
             uiMgr.settings.camAzimuth = (float)glfwGetTime() * 0.5f;
         }
         
-        if (uiMgr.settings.loadModelTriggered && !isLoading) {
+        if (uiMgr.settings.loadModelTriggered && !modelLoader.is_loading()) {
             uiMgr.settings.loadModelTriggered = false; 
-            isLoading = true;
-            loadingFuture = std::async(std::launch::async, load_model_task, std::string(uiMgr.settings.modelPath));
+            modelLoader.start_loading(uiMgr.settings.modelPath);
         }
 
-        if (isLoading && loadingFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-            bool success = loadingFuture.get(); 
-            isLoading = false;
-
-            if (success) {
-                vkDeviceWaitIdle(windowMgr.ctx.device);
+        if (modelLoader.check_finished(loadedData)) {
+            if (loadedData.success) {
+                vkDeviceWaitIdle(windowMgr.get_context()->device);
                 
-                shaderCtrl.reload_buffers(pendingData.gpu_triangles, pendingData.nodes);
-                meshBounds = pendingData.obj.bounds;
+                shaderCtrl.reload_buffers(loadedData.gpu_triangles, loadedData.nodes);
+                meshBounds = loadedData.bounds;
 
                 vec3 ext = sub(meshBounds.maxPos, meshBounds.minPos);
                 float maxDim = std::max({ext.x, ext.y, ext.z});
@@ -159,15 +191,8 @@ int main() {
                 
                 std::cout << "[Loader] GPU Upload complete. Resume rendering.\n";
             }
-            
-            pendingData.triangles.clear();
-            pendingData.gpu_triangles.clear();
-            pendingData.nodes.clear();
-            pendingData.indices.clear();
-            pendingData.obj.mesh.clear();
         }
 
-        // Bridge UI settings to Shader Rendering completely decoupled
         Render::RenderParams params;
         params.camAzimuth = uiMgr.settings.camAzimuth;
         params.camElevation = uiMgr.settings.camElevation;
@@ -184,9 +209,7 @@ int main() {
         }); 
     }
 
-    // Explicitly wait for idle before destructors fire
-    vkDeviceWaitIdle(windowMgr.ctx.device); 
+    vkDeviceWaitIdle(windowMgr.get_context()->device); 
 
-    // RAII takes care of all memory freeing and destruction natively here
     return 0;
 }

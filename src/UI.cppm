@@ -10,6 +10,7 @@ module;
 #include <iostream>
 #include <cstring>
 #include <cstdlib> 
+
 export module UI;
 
 import Window;
@@ -17,6 +18,9 @@ import Types;
 
 export namespace UI
 {
+    /**
+     * @brief User interface parameters to control the rendering and logic.
+     */
     struct Settings {
         int maxBounces = 2;
         float light1Color[3] = {0.851f, 0.7569f, 0.5412f};
@@ -48,6 +52,7 @@ export namespace UI
 
     /**
      * @brief Manages ImGui UI rendering using an injected VulkanContext.
+     * Completely decoupled from global Vulkan state.
      */
     class UIManager {
     public:
@@ -59,6 +64,10 @@ export namespace UI
         UIManager(const UIManager&) = delete;
         UIManager& operator=(const UIManager&) = delete;
 
+        /**
+         * @brief Initializes ImGui descriptors and state using Dependency Injection.
+         * @param context Pointer to active VulkanContext.
+         */
         void init(Render::VulkanContext* context) {
             ctx = context;
             
