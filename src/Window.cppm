@@ -41,14 +41,22 @@ export namespace Render
      * @brief Manages the Vulkan window and core instance lifecycle using RAII.
      */
     class WindowManager {
-    public:
-        VulkanContext ctx;
+    private:
+        VulkanContext m_ctx; // Стан тепер повністю інкапсульований
 
+    public:
         WindowManager() = default;
         ~WindowManager() { cleanup(); }
 
         WindowManager(const WindowManager&) = delete;
         WindowManager& operator=(const WindowManager&) = delete;
+
+        /**
+         * @brief Gets a pointer to the Vulkan context.
+         * @return Pointer to the Vulkan context for dependency injection.
+         */
+        VulkanContext* get_context() { return &m_ctx; }
+        const VulkanContext* get_context() const { return &m_ctx; }
 
         /**
          * @brief Initializes Vulkan core components like Instance, Device, and Swapchain.
@@ -57,7 +65,7 @@ export namespace Render
         void init_vulkan() {
             init_window();
             create_instance();
-            check(glfwCreateWindowSurface(ctx.instance, ctx.window, nullptr, &ctx.surface) == VK_SUCCESS, "Failed to create window surface!");
+            check(glfwCreateWindowSurface(m_ctx.instance, m_ctx.window, nullptr, &m_ctx.surface) == VK_SUCCESS, "Failed to create window surface!");
             pick_physical_device();
             create_logical_device();
             
@@ -72,13 +80,13 @@ export namespace Render
          */
         void recreate_swapchain() {
             int width = 0, height = 0;
-            glfwGetFramebufferSize(ctx.window, &width, &height);
+            glfwGetFramebufferSize(m_ctx.window, &width, &height);
             while (width == 0 || height == 0) {
-                glfwGetFramebufferSize(ctx.window, &width, &height);
+                glfwGetFramebufferSize(m_ctx.window, &width, &height);
                 glfwWaitEvents();
             }
 
-            vkDeviceWaitIdle(ctx.device);
+            vkDeviceWaitIdle(m_ctx.device);
 
             cleanup_swapchain();
             create_swapchain();
@@ -114,7 +122,7 @@ export namespace Render
             for (const auto& queueFamily : queueFamilies) {
                 if (queueFamily.queueFlags & VK_QUEUE_COMPUTE_BIT) indices.computeFamily = i;
                 VkBool32 presentSupport = false;
-                vkGetPhysicalDeviceSurfaceSupportKHR(device, i, ctx.surface, &presentSupport);
+                vkGetPhysicalDeviceSurfaceSupportKHR(device, i, m_ctx.surface, &presentSupport);
                 if (presentSupport) indices.presentFamily = i;
                 if (indices.isComplete()) break;
                 i++;
@@ -124,18 +132,18 @@ export namespace Render
 
         SwapChainSupportDetails querySwapChainSupport(VkPhysicalDevice device) {
             SwapChainSupportDetails details;
-            vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, ctx.surface, &details.capabilities);
+            vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, m_ctx.surface, &details.capabilities);
             uint32_t formatCount;
-            vkGetPhysicalDeviceSurfaceFormatsKHR(device, ctx.surface, &formatCount, nullptr);
+            vkGetPhysicalDeviceSurfaceFormatsKHR(device, m_ctx.surface, &formatCount, nullptr);
             if (formatCount != 0) {
                 details.formats.resize(formatCount);
-                vkGetPhysicalDeviceSurfaceFormatsKHR(device, ctx.surface, &formatCount, details.formats.data());
+                vkGetPhysicalDeviceSurfaceFormatsKHR(device, m_ctx.surface, &formatCount, details.formats.data());
             }
             uint32_t presentModeCount;
-            vkGetPhysicalDeviceSurfacePresentModesKHR(device, ctx.surface, &presentModeCount, nullptr);
+            vkGetPhysicalDeviceSurfacePresentModesKHR(device, m_ctx.surface, &presentModeCount, nullptr);
             if (presentModeCount != 0) {
                 details.presentModes.resize(presentModeCount);
-                vkGetPhysicalDeviceSurfacePresentModesKHR(device, ctx.surface, &presentModeCount, details.presentModes.data());
+                vkGetPhysicalDeviceSurfacePresentModesKHR(device, m_ctx.surface, &presentModeCount, details.presentModes.data());
             }
             return details;
         }
@@ -161,7 +169,7 @@ export namespace Render
                 return capabilities.currentExtent;
             } else {
                 int width, height;
-                glfwGetFramebufferSize(ctx.window, &width, &height);
+                glfwGetFramebufferSize(m_ctx.window, &width, &height);
                 VkExtent2D actualExtent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
                 actualExtent.width = std::clamp(actualExtent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
                 actualExtent.height = std::clamp(actualExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
@@ -170,7 +178,7 @@ export namespace Render
         }
 
         void create_swapchain() {
-            SwapChainSupportDetails swapChainSupport = querySwapChainSupport(ctx.physicalDevice);
+            SwapChainSupportDetails swapChainSupport = querySwapChainSupport(m_ctx.physicalDevice);
             VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats);
             VkPresentModeKHR presentMode = chooseSwapPresentMode(swapChainSupport.presentModes);
             VkExtent2D extent = chooseSwapExtent(swapChainSupport.capabilities);
@@ -182,7 +190,7 @@ export namespace Render
 
             VkSwapchainCreateInfoKHR createInfo = {
                 .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-                .surface = ctx.surface,
+                .surface = m_ctx.surface,
                 .minImageCount = imageCount,
                 .imageFormat = surfaceFormat.format,
                 .imageColorSpace = surfaceFormat.colorSpace,
@@ -196,7 +204,7 @@ export namespace Render
                 .oldSwapchain = VK_NULL_HANDLE
             };
 
-            QueueFamilyIndices indices = findQueueFamilies(ctx.physicalDevice);
+            QueueFamilyIndices indices = findQueueFamilies(m_ctx.physicalDevice);
             uint32_t queueFamilyIndices[] = {indices.computeFamily.value(), indices.presentFamily.value()};
 
             if (indices.computeFamily != indices.presentFamily) {
@@ -207,36 +215,36 @@ export namespace Render
                 createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
             }
 
-            check(vkCreateSwapchainKHR(ctx.device, &createInfo, nullptr, &ctx.swapChain) == VK_SUCCESS, "Failed to create swapchain!");
+            check(vkCreateSwapchainKHR(m_ctx.device, &createInfo, nullptr, &m_ctx.swapChain) == VK_SUCCESS, "Failed to create swapchain!");
 
-            vkGetSwapchainImagesKHR(ctx.device, ctx.swapChain, &imageCount, nullptr);
-            ctx.swapChainImages.resize(imageCount);
-            vkGetSwapchainImagesKHR(ctx.device, ctx.swapChain, &imageCount, ctx.swapChainImages.data());
+            vkGetSwapchainImagesKHR(m_ctx.device, m_ctx.swapChain, &imageCount, nullptr);
+            m_ctx.swapChainImages.resize(imageCount);
+            vkGetSwapchainImagesKHR(m_ctx.device, m_ctx.swapChain, &imageCount, m_ctx.swapChainImages.data());
 
-            ctx.swapChainImageFormat = surfaceFormat.format;
-            ctx.swapChainExtent = extent;
+            m_ctx.swapChainImageFormat = surfaceFormat.format;
+            m_ctx.swapChainExtent = extent;
         }
 
         void create_image_views() {
-            ctx.swapChainImageViews.resize(ctx.swapChainImages.size());
-            for (size_t i = 0; i < ctx.swapChainImages.size(); i++) {
+            m_ctx.swapChainImageViews.resize(m_ctx.swapChainImages.size());
+            for (size_t i = 0; i < m_ctx.swapChainImages.size(); i++) {
                 VkImageViewCreateInfo createInfo = {
                     .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-                    .image = ctx.swapChainImages[i],
+                    .image = m_ctx.swapChainImages[i],
                     .viewType = VK_IMAGE_VIEW_TYPE_2D,
-                    .format = ctx.swapChainImageFormat,
+                    .format = m_ctx.swapChainImageFormat,
                     .components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY },
                     .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
                 };
-                check(vkCreateImageView(ctx.device, &createInfo, nullptr, &ctx.swapChainImageViews[i]) == VK_SUCCESS, "Failed to create image views!");
+                check(vkCreateImageView(m_ctx.device, &createInfo, nullptr, &m_ctx.swapChainImageViews[i]) == VK_SUCCESS, "Failed to create image views!");
             }
         }
 
         void cleanup_swapchain() {
-            for (auto imageView : ctx.swapChainImageViews) {
-                vkDestroyImageView(ctx.device, imageView, nullptr);
+            for (auto imageView : m_ctx.swapChainImageViews) {
+                vkDestroyImageView(m_ctx.device, imageView, nullptr);
             }
-            vkDestroySwapchainKHR(ctx.device, ctx.swapChain, nullptr);
+            vkDestroySwapchainKHR(m_ctx.device, m_ctx.swapChain, nullptr);
         }
 
         void init_window() {
@@ -244,11 +252,11 @@ export namespace Render
             glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); 
             glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE); 
             
-            ctx.window = glfwCreateWindow(800, 600, "Vulkan Raytracing", nullptr, nullptr);
-            check(ctx.window != nullptr, "Failed to create GLFW window!");
+            m_ctx.window = glfwCreateWindow(800, 600, "Vulkan Raytracing", nullptr, nullptr);
+            check(m_ctx.window != nullptr, "Failed to create GLFW window!");
 
-            glfwSetWindowUserPointer(ctx.window, &ctx);
-            glfwSetFramebufferSizeCallback(ctx.window, framebufferResizeCallback);
+            glfwSetWindowUserPointer(m_ctx.window, &m_ctx);
+            glfwSetFramebufferSizeCallback(m_ctx.window, framebufferResizeCallback);
         }
 
         void create_instance() {
@@ -268,31 +276,31 @@ export namespace Render
                 .ppEnabledExtensionNames = glfwExtensions
             };
 
-            check(vkCreateInstance(&createInfo, nullptr, &ctx.instance) == VK_SUCCESS, "Failed to create Vulkan instance!");
+            check(vkCreateInstance(&createInfo, nullptr, &m_ctx.instance) == VK_SUCCESS, "Failed to create Vulkan instance!");
         }
 
         void pick_physical_device() {
             uint32_t deviceCount = 0;
-            vkEnumeratePhysicalDevices(ctx.instance, &deviceCount, nullptr);
+            vkEnumeratePhysicalDevices(m_ctx.instance, &deviceCount, nullptr);
             check(deviceCount > 0, "Failed to find GPUs with Vulkan support!");
             
             std::vector<VkPhysicalDevice> devices(deviceCount);
-            vkEnumeratePhysicalDevices(ctx.instance, &deviceCount, devices.data());
+            vkEnumeratePhysicalDevices(m_ctx.instance, &deviceCount, devices.data());
             
             for (const auto& dev : devices) {
                 QueueFamilyIndices indices = findQueueFamilies(dev);
                 SwapChainSupportDetails details = querySwapChainSupport(dev);
                 if (indices.isComplete() && !details.formats.empty() && !details.presentModes.empty()) {
-                    ctx.physicalDevice = dev;
+                    m_ctx.physicalDevice = dev;
                     break;
                 }
             }
-            check(ctx.physicalDevice != VK_NULL_HANDLE, "Failed to find a suitable GPU!");
+            check(m_ctx.physicalDevice != VK_NULL_HANDLE, "Failed to find a suitable GPU!");
         }
 
         void create_logical_device() {
-            QueueFamilyIndices indices = findQueueFamilies(ctx.physicalDevice);
-            ctx.computeQueueFamilyIndex = indices.computeFamily.value();
+            QueueFamilyIndices indices = findQueueFamilies(m_ctx.physicalDevice);
+            m_ctx.computeQueueFamilyIndex = indices.computeFamily.value();
             
             std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
             std::set<uint32_t> uniqueQueueFamilies = {indices.computeFamily.value(), indices.presentFamily.value()};
@@ -318,22 +326,22 @@ export namespace Render
                 .ppEnabledExtensionNames = deviceExtensions.data()
             };
 
-            check(vkCreateDevice(ctx.physicalDevice, &createInfo, nullptr, &ctx.device) == VK_SUCCESS, "Failed to create logical device!");
+            check(vkCreateDevice(m_ctx.physicalDevice, &createInfo, nullptr, &m_ctx.device) == VK_SUCCESS, "Failed to create logical device!");
             
-            vkGetDeviceQueue(ctx.device, indices.computeFamily.value(), 0, &ctx.computeQueue);
-            vkGetDeviceQueue(ctx.device, indices.presentFamily.value(), 0, &ctx.presentQueue);
+            vkGetDeviceQueue(m_ctx.device, indices.computeFamily.value(), 0, &m_ctx.computeQueue);
+            vkGetDeviceQueue(m_ctx.device, indices.presentFamily.value(), 0, &m_ctx.presentQueue);
         }
 
         void cleanup() {
-            if (!ctx.device) return;
-            vkDeviceWaitIdle(ctx.device);
+            if (!m_ctx.device) return;
+            vkDeviceWaitIdle(m_ctx.device);
             cleanup_swapchain();
-            vkDestroyDevice(ctx.device, nullptr);
-            vkDestroySurfaceKHR(ctx.instance, ctx.surface, nullptr);
-            vkDestroyInstance(ctx.instance, nullptr);
-            glfwDestroyWindow(ctx.window);
+            vkDestroyDevice(m_ctx.device, nullptr);
+            vkDestroySurfaceKHR(m_ctx.instance, m_ctx.surface, nullptr);
+            vkDestroyInstance(m_ctx.instance, nullptr);
+            glfwDestroyWindow(m_ctx.window);
             glfwTerminate();
-            ctx.device = VK_NULL_HANDLE;
+            m_ctx.device = VK_NULL_HANDLE;
         }
     };
 }
