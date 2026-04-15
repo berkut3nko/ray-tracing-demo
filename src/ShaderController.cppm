@@ -45,7 +45,98 @@ export namespace Render
     };
 
     /**
+     * @brief Handles Vulkan buffer creation and memory allocation.
+     * Separates memory management logic from the rendering pipeline.
+     */
+    class BufferAllocator {
+    public:
+        BufferAllocator(VulkanContext* context) : ctx(context) {}
+
+        /**
+         * @brief Creates a Vulkan buffer and allocates memory for it.
+         * @param size Size of the buffer in bytes.
+         * @param usage Usage flags for the buffer.
+         * @param properties Memory property flags.
+         * @param buffer Output buffer handle.
+         * @param bufferMemory Output memory handle.
+         * @warning Assumes context is valid. Destroys existing buffer if already allocated.
+         */
+        void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
+            if (buffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(ctx->device, buffer, nullptr);
+                buffer = VK_NULL_HANDLE;
+            }
+            if (bufferMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(ctx->device, bufferMemory, nullptr);
+                bufferMemory = VK_NULL_HANDLE;
+            }
+
+            VkBufferCreateInfo bufferInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+            check(vkCreateBuffer(ctx->device, &bufferInfo, nullptr, &buffer) == VK_SUCCESS, "Failed to create buffer");
+            
+            VkMemoryRequirements memRequirements; 
+            vkGetBufferMemoryRequirements(ctx->device, buffer, &memRequirements);
+            
+            VkMemoryAllocateInfo allocInfo = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = memRequirements.size, .memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties) };
+            check(vkAllocateMemory(ctx->device, &allocInfo, nullptr, &bufferMemory) == VK_SUCCESS, "Failed to allocate buffer memory");
+            vkBindBufferMemory(ctx->device, buffer, bufferMemory, 0);
+        }
+
+    private:
+        VulkanContext* ctx;
+
+        uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+            VkPhysicalDeviceMemoryProperties memProperties; 
+            vkGetPhysicalDeviceMemoryProperties(ctx->physicalDevice, &memProperties);
+            for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) 
+                if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) return i;
+            
+            check(false, "Failed to find suitable memory type!");
+            return -1;
+        }
+    };
+
+    /**
+     * @brief Handles file I/O and shader compilation.
+     * Separates system calls and file reading from the rendering pipeline.
+     */
+    class ShaderLoader {
+    public:
+        /**
+         * @brief Compiles a GLSL shader to SPIR-V and loads it into a Vulkan module.
+         * @param ctx Pointer to active VulkanContext.
+         * @param sourcePath Path to the .comp source file.
+         * @param spvPath Path for the compiled .spv output.
+         */
+        static VkShaderModule compileAndLoad(VulkanContext* ctx, const std::string& sourcePath, const std::string& spvPath) {
+            std::string command = "glslc " + sourcePath + " -o " + spvPath;
+            int result = std::system(command.c_str());
+            if (result != 0) {
+                std::cerr << "[Warning] Shader compilation failed or 'glslc' not found.\n";
+            }
+
+            auto code = readFile(spvPath);
+            VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = code.size(), .pCode = reinterpret_cast<const uint32_t*>(code.data()) };
+            VkShaderModule m; 
+            check(vkCreateShaderModule(ctx->device, &ci, nullptr, &m) == VK_SUCCESS, "Failed to create shader module");
+            return m;
+        }
+
+    private:
+        static std::vector<char> readFile(const std::string& filename) {
+            std::ifstream file(filename, std::ios::ate | std::ios::binary);
+            check(file.is_open(), ("Failed to open file: " + filename).c_str());
+            size_t size = (size_t)file.tellg(); 
+            std::vector<char> buf(size); 
+            file.seekg(0); 
+            file.read(buf.data(), size); 
+            return buf;
+        }
+    };
+
+    /**
      * @brief Controls compute shader execution and resource binding.
+     * Focused strictly on pipeline state, descriptor sets, and command recording.
      */
     class ShaderController {
     public:
@@ -58,12 +149,13 @@ export namespace Render
         /**
          * @brief Initializes shader resources using the provided context.
          * @param context Pointer to active VulkanContext.
+         * @warning Assumes context pointer is valid.
          */
         bool init(VulkanContext* context) {
             ctx = context;
-            compile_shader_if_needed();
+            BufferAllocator allocator(ctx);
 
-            createBuffer(sizeof(SceneSettingsUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uboSettingsBuffer, uboSettingsBufferMemory);
+            allocator.createBuffer(sizeof(SceneSettingsUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uboSettingsBuffer, uboSettingsBufferMemory);
             vkMapMemory(ctx->device, uboSettingsBufferMemory, 0, sizeof(SceneSettingsUBO), 0, &uboMappedData);
 
             std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
@@ -79,8 +171,7 @@ export namespace Render
             VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &computeDescriptorSetLayout, .pushConstantRangeCount = 1, .pPushConstantRanges = &pc };
             check(vkCreatePipelineLayout(ctx->device, &pli, nullptr, &computePipelineLayout) == VK_SUCCESS, "Pipeline layout failed");
 
-            auto code = readFile("src/shaders/raytrace.comp.spv");
-            auto mod = createShaderModule(code);
+            VkShaderModule mod = ShaderLoader::compileAndLoad(ctx, "src/shaders/raytrace.comp", "src/shaders/raytrace.comp.spv");
             
             VkPipelineShaderStageCreateInfo ssi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = mod, .pName = "main" };
             VkComputePipelineCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = ssi, .layout = computePipelineLayout };
@@ -214,61 +305,6 @@ export namespace Render
             ctx = nullptr;
         }
 
-        void compile_shader_if_needed() {
-            int result = std::system("glslc src/shaders/raytrace.comp -o src/shaders/raytrace.comp.spv");
-            if (result != 0) {
-                std::cerr << "[Warning] Shader compilation failed or 'glslc' not found.\n";
-            }
-        }
-
-        uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
-            VkPhysicalDeviceMemoryProperties memProperties; 
-            vkGetPhysicalDeviceMemoryProperties(ctx->physicalDevice, &memProperties);
-            for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) 
-                if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) return i;
-            
-            check(false, "Failed to find suitable memory type!");
-            return -1;
-        }
-
-        void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
-            if (buffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(ctx->device, buffer, nullptr);
-                buffer = VK_NULL_HANDLE;
-            }
-            if (bufferMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(ctx->device, bufferMemory, nullptr);
-                bufferMemory = VK_NULL_HANDLE;
-            }
-
-            VkBufferCreateInfo bufferInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
-            check(vkCreateBuffer(ctx->device, &bufferInfo, nullptr, &buffer) == VK_SUCCESS, "Failed to create buffer");
-            
-            VkMemoryRequirements memRequirements; 
-            vkGetBufferMemoryRequirements(ctx->device, buffer, &memRequirements);
-            
-            VkMemoryAllocateInfo allocInfo = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = memRequirements.size, .memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties) };
-            check(vkAllocateMemory(ctx->device, &allocInfo, nullptr, &bufferMemory) == VK_SUCCESS, "Failed to allocate buffer memory");
-            vkBindBufferMemory(ctx->device, buffer, bufferMemory, 0);
-        }
-
-        std::vector<char> readFile(const std::string& filename) {
-            std::ifstream file(filename, std::ios::ate | std::ios::binary);
-            check(file.is_open(), ("Failed to open file: " + filename).c_str());
-            size_t size = (size_t)file.tellg(); 
-            std::vector<char> buf(size); 
-            file.seekg(0); 
-            file.read(buf.data(), size); 
-            return buf;
-        }
-
-        VkShaderModule createShaderModule(const std::vector<char>& code) {
-            VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = code.size(), .pCode = reinterpret_cast<const uint32_t*>(code.data()) };
-            VkShaderModule m; 
-            check(vkCreateShaderModule(ctx->device, &ci, nullptr, &m) == VK_SUCCESS, "Failed to create shader module");
-            return m;
-        }
-
         void update_descriptor_sets() {
             if (descriptorSets.empty()) return; 
 
@@ -291,7 +327,8 @@ export namespace Render
 
         bool ssbo_triangle(std::span<const RaytraceTriangle> triangles) {
             if (triangles.empty()) return false;
-            createBuffer(sizeof(RaytraceTriangle) * triangles.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, triangleBuffer, triangleBufferMemory);
+            BufferAllocator allocator(ctx);
+            allocator.createBuffer(sizeof(RaytraceTriangle) * triangles.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, triangleBuffer, triangleBufferMemory);
             void* data; 
             vkMapMemory(ctx->device, triangleBufferMemory, 0, sizeof(RaytraceTriangle) * triangles.size(), 0, &data);
             memcpy(data, triangles.data(), sizeof(RaytraceTriangle) * triangles.size()); 
@@ -301,7 +338,8 @@ export namespace Render
 
         bool ssbo_bvh(std::span<const BVHNode> nodes) {
             if (nodes.empty()) return false;
-            createBuffer(sizeof(BVHNode) * nodes.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, bvhBuffer, bvhBufferMemory);
+            BufferAllocator allocator(ctx);
+            allocator.createBuffer(sizeof(BVHNode) * nodes.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, bvhBuffer, bvhBufferMemory);
             void* data; 
             vkMapMemory(ctx->device, bvhBufferMemory, 0, sizeof(BVHNode) * nodes.size(), 0, &data);
             memcpy(data, nodes.data(), sizeof(BVHNode) * nodes.size()); 
